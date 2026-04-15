@@ -19,8 +19,8 @@ type Config struct {
 
 	// Server configuration (optional, has defaults)
 	Port     string // Default: "443"
-	CertFile string // Default: "certs/server.crt"
-	KeyFile  string // Default: "certs/server.key"
+	CertFile string // TLS cert file path; TLS is disabled when empty
+	KeyFile  string // TLS key file path; TLS is disabled when empty
 
 	// Optional
 	RunID        string
@@ -31,8 +31,8 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Port:         "443",
-		CertFile:     "/etc/cache-server/server.crt",
-		KeyFile:      "/etc/cache-server/server.key",
+		CertFile:     "", // TLS disabled unless CACHE_CERT_FILE is set
+		KeyFile:      "", // TLS disabled unless CACHE_KEY_FILE is set
 		MaxSizeBytes: 25 * 1024 * 1024 * 1024, // 25GB
 	}
 }

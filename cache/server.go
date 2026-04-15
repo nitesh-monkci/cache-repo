@@ -88,8 +88,8 @@ func (s *Server) Start(ctx context.Context) error {
 		Str("write_scope", s.config.WriteScope).
 		Msg("Cache server ready")
 
-	// Start server
-	if s.config.Port == "443" {
+	// Start server — TLS is enabled when cert and key files are explicitly configured
+	if s.config.CertFile != "" && s.config.KeyFile != "" {
 		return s.httpServer.ListenAndServeTLS(s.config.CertFile, s.config.KeyFile)
 	}
 	return s.httpServer.ListenAndServe()
