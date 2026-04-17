@@ -502,16 +502,30 @@ func (h *Handlers) HandleAzureBlobHead(w http.ResponseWriter, r *http.Request, e
 }
 
 // HandleAzureBlobDownload handles GET /cache-blobs/<id> with optional Range header.
-// Parallel workers each send "Range: bytes=START-END"; we serve each slice
-// via GCS NewRangeReader so only the requested bytes are fetched from GCS.
+// Supports both standard "Range" and Azure-specific "x-ms-range" headers.
+// Parallel workers each send a range header; we serve each slice via GCS
+// NewRangeReader so only the requested bytes are fetched from GCS.
 func (h *Handlers) HandleAzureBlobDownload(w http.ResponseWriter, r *http.Request, entry *CacheEntry) {
 	ctx := context.Background()
 	gcsPath := h.indexManager.BlobGCSPath(entry.Scope, entry.BlobID)
 	obj := h.gcsClient.Bucket(h.config.Bucket).Object(gcsPath)
 
+	// Azure SDK may send x-ms-range instead of (or in addition to) the standard Range header.
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader == "" {
-		// No Range header — full download fallback
+		rangeHeader = r.Header.Get("x-ms-range")
+	}
+
+	// Log all incoming headers at debug level so range header issues are diagnosable.
+	h.logger.Debug().
+		Str("blob_id", entry.BlobID).
+		Str("range_header", rangeHeader).
+		Interface("all_headers", r.Header).
+		Msg("Azure GET headers")
+
+	if rangeHeader == "" {
+		// No Range header — full download fallback (should be rare after HEAD negotiation)
+		gcsStart := time.Now()
 		reader, err := obj.NewReader(ctx)
 		if err != nil {
 			h.logger.Error().Err(err).Str("blob_id", entry.BlobID).Msg("Azure GET: GCS read failed")
@@ -521,8 +535,14 @@ func (h *Handlers) HandleAzureBlobDownload(w http.ResponseWriter, r *http.Reques
 		defer reader.Close()
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", reader.Attrs.Size))
+		w.Header().Set("Accept-Ranges", "bytes")
 		written, _ := io.Copy(w, reader)
-		h.logger.Info().Str("blob_id", entry.BlobID).Int64("bytes", written).Msg("Azure GET full download")
+		h.logger.Info().
+			Str("blob_id", entry.BlobID).
+			Int64("total_size", reader.Attrs.Size).
+			Int64("bytes_sent", written).
+			Dur("gcs_elapsed_ms", time.Since(gcsStart)).
+			Msg("Azure GET full download (no Range header — check x-ms-range support)")
 		return
 	}
 
@@ -550,6 +570,7 @@ func (h *Handlers) HandleAzureBlobDownload(w http.ResponseWriter, r *http.Reques
 		length = end - start + 1
 	}
 
+	gcsStart := time.Now()
 	reader, err := obj.NewRangeReader(ctx, start, length)
 	if err != nil {
 		h.logger.Error().Err(err).Str("blob_id", entry.BlobID).
@@ -573,7 +594,9 @@ func (h *Handlers) HandleAzureBlobDownload(w http.ResponseWriter, r *http.Reques
 	written, _ := io.Copy(w, reader)
 	h.logger.Info().
 		Str("blob_id", entry.BlobID).
-		Int64("start", start).Int64("end", end).Int64("bytes", written).
+		Int64("start", start).Int64("end", end).
+		Int64("bytes_sent", written).
+		Dur("gcs_elapsed_ms", time.Since(gcsStart)).
 		Msg("Azure GET range download")
 }
 
