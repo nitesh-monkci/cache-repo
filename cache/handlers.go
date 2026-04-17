@@ -75,6 +75,16 @@ func NewHandlers(config *Config, gcsClient *storage.Client, indexManager *IndexM
 	}
 	logger.Info().Str("real_ip", realIP).Msg("Resolved GitHub results-receiver IP via external DNS")
 
+	if config.AzureBlobHost != "" {
+		h.logger.Info().
+			Str("azure_blob_host", config.AzureBlobHost).
+			Msg("Download URL mode: Azure (parallel chunked downloads via Azure SDK)")
+	} else {
+		h.logger.Info().
+			Str("github_url", githubResultsURL).
+			Msg("Download URL mode: GitHub single-stream")
+	}
+
 	return h
 }
 
@@ -213,16 +223,18 @@ func (h *Handlers) HandleGetCache(w http.ResponseWriter, r *http.Request) {
 	for _, scope := range readScopes {
 		entry := h.indexManager.Get(scope, req.Key, req.Version)
 		if entry != nil && entry.Size > 0 {
+			downloadURL := h.buildDownloadURL(entry.BlobID)
 			h.logger.Info().
 				Str("key", req.Key).
 				Str("scope", scope).
 				Str("blob_id", entry.BlobID).
 				Int64("size", entry.Size).
+				Str("download_url", downloadURL).
 				Msg("Cache HIT (exact match)")
 
 			h.jsonResponse(w, map[string]interface{}{
 				"ok":                  true,
-				"signed_download_url": h.buildDownloadURL(entry.BlobID),
+				"signed_download_url": downloadURL,
 				"matched_key":         entry.Key,
 			})
 			return
@@ -234,6 +246,7 @@ func (h *Handlers) HandleGetCache(w http.ResponseWriter, r *http.Request) {
 		for _, scope := range readScopes {
 			entry := h.indexManager.FindByPrefix(scope, prefix, req.Version)
 			if entry != nil && entry.Size > 0 {
+				downloadURL := h.buildDownloadURL(entry.BlobID)
 				h.logger.Info().
 					Str("key", req.Key).
 					Str("prefix", prefix).
@@ -241,11 +254,12 @@ func (h *Handlers) HandleGetCache(w http.ResponseWriter, r *http.Request) {
 					Str("matched_key", entry.Key).
 					Str("blob_id", entry.BlobID).
 					Int64("size", entry.Size).
+					Str("download_url", downloadURL).
 					Msg("Cache HIT (prefix match)")
 
 				h.jsonResponse(w, map[string]interface{}{
 					"ok":                  true,
-					"signed_download_url": h.buildDownloadURL(entry.BlobID),
+					"signed_download_url": downloadURL,
 					"matched_key":         entry.Key,
 				})
 				return
