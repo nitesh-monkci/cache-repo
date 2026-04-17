@@ -22,6 +22,11 @@ type Config struct {
 	CertFile string // TLS cert file path; TLS is disabled when empty
 	KeyFile  string // TLS key file path; TLS is disabled when empty
 
+	// Azure Blob fast-download path (optional)
+	// When set, download URLs are returned as https://<AzureBlobHost>/cache-blobs/<id>
+	// so the GitHub Actions toolkit activates its Azure SDK parallel-download path.
+	AzureBlobHost string
+
 	// Optional
 	RunID        string
 	MaxSizeBytes int64 // Max cache size per repo (default: 25GB)

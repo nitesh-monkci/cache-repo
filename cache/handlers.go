@@ -14,6 +14,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,17 @@ func NewHandlers(config *Config, gcsClient *storage.Client, indexManager *IndexM
 	logger.Info().Str("real_ip", realIP).Msg("Resolved GitHub results-receiver IP via external DNS")
 
 	return h
+}
+
+// buildDownloadURL returns the download URL for a blob.
+// When AzureBlobHost is set, returns an Azure-style URL so the GitHub Actions
+// toolkit activates its parallel chunked-download path (8 workers, Range headers).
+func (h *Handlers) buildDownloadURL(blobID string) string {
+	if h.config.AzureBlobHost != "" {
+		return fmt.Sprintf("https://%s/cache-blobs/%s?sv=2024-05-04&sr=b&sp=r&sig=monkci",
+			h.config.AzureBlobHost, blobID)
+	}
+	return fmt.Sprintf("%s/blob/%s", h.baseURL, blobID)
 }
 
 func resolveViaExternalDNS(host string, logger zerolog.Logger) string {
@@ -210,7 +222,7 @@ func (h *Handlers) HandleGetCache(w http.ResponseWriter, r *http.Request) {
 
 			h.jsonResponse(w, map[string]interface{}{
 				"ok":                  true,
-				"signed_download_url": fmt.Sprintf("%s/blob/%s", h.baseURL, entry.BlobID),
+				"signed_download_url": h.buildDownloadURL(entry.BlobID),
 				"matched_key":         entry.Key,
 			})
 			return
@@ -233,7 +245,7 @@ func (h *Handlers) HandleGetCache(w http.ResponseWriter, r *http.Request) {
 
 				h.jsonResponse(w, map[string]interface{}{
 					"ok":                  true,
-					"signed_download_url": fmt.Sprintf("%s/blob/%s", h.baseURL, entry.BlobID),
+					"signed_download_url": h.buildDownloadURL(entry.BlobID),
 					"matched_key":         entry.Key,
 				})
 				return
@@ -417,6 +429,138 @@ func (h *Handlers) BlobRouter(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn().Str("method", r.Method).Msg("Method not allowed")
 		http.Error(w, "Method not allowed", 405)
 	}
+}
+
+// AzureBlobRouter routes /cache-blobs/<blobID> requests.
+// This endpoint mimics Azure Blob Storage so the toolkit's Azure SDK
+// download path is activated (parallel range requests).
+func (h *Handlers) AzureBlobRouter(w http.ResponseWriter, r *http.Request) {
+	blobID := strings.TrimPrefix(r.URL.Path, "/cache-blobs/")
+	blobID = strings.Split(blobID, "?")[0]
+
+	h.logger.Info().
+		Str("method", r.Method).
+		Str("blob_id", blobID).
+		Msg("Azure blob request received")
+
+	entry := h.indexManager.GetByBlobID(blobID)
+	if entry == nil {
+		h.logger.Warn().Str("blob_id", blobID).Msg("Azure blob not found in index")
+		http.Error(w, "Not found", 404)
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		h.HandleAzureBlobDownload(w, r, entry)
+	case "HEAD":
+		h.HandleAzureBlobHead(w, r, entry)
+	default:
+		http.Error(w, "Method not allowed", 405)
+	}
+}
+
+// HandleAzureBlobHead responds to HEAD /cache-blobs/<id>.
+// Returns Content-Length and Azure-compatible headers so the SDK
+// can compute chunk boundaries before issuing parallel range GETs.
+func (h *Handlers) HandleAzureBlobHead(w http.ResponseWriter, r *http.Request, entry *CacheEntry) {
+	h.logger.Info().Str("blob_id", entry.BlobID).Msg("Azure blob HEAD request")
+
+	ctx := context.Background()
+	gcsPath := h.indexManager.BlobGCSPath(entry.Scope, entry.BlobID)
+	obj := h.gcsClient.Bucket(h.config.Bucket).Object(gcsPath)
+
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		h.logger.Error().Err(err).Str("blob_id", entry.BlobID).Msg("Azure HEAD: GCS attrs failed")
+		http.Error(w, "Not found", 404)
+		return
+	}
+
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", attrs.Size))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("x-ms-blob-type", "BlockBlob")
+	w.Header().Set("x-ms-version", "2020-10-02")
+	w.WriteHeader(200)
+
+	h.logger.Info().Str("blob_id", entry.BlobID).Int64("size", attrs.Size).Msg("Azure HEAD response sent")
+}
+
+// HandleAzureBlobDownload handles GET /cache-blobs/<id> with optional Range header.
+// Parallel workers each send "Range: bytes=START-END"; we serve each slice
+// via GCS NewRangeReader so only the requested bytes are fetched from GCS.
+func (h *Handlers) HandleAzureBlobDownload(w http.ResponseWriter, r *http.Request, entry *CacheEntry) {
+	ctx := context.Background()
+	gcsPath := h.indexManager.BlobGCSPath(entry.Scope, entry.BlobID)
+	obj := h.gcsClient.Bucket(h.config.Bucket).Object(gcsPath)
+
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader == "" {
+		// No Range header — full download fallback
+		reader, err := obj.NewReader(ctx)
+		if err != nil {
+			h.logger.Error().Err(err).Str("blob_id", entry.BlobID).Msg("Azure GET: GCS read failed")
+			http.Error(w, "Not found", 404)
+			return
+		}
+		defer reader.Close()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", reader.Attrs.Size))
+		written, _ := io.Copy(w, reader)
+		h.logger.Info().Str("blob_id", entry.BlobID).Int64("bytes", written).Msg("Azure GET full download")
+		return
+	}
+
+	// Parse "bytes=START-END" (or "bytes=START-")
+	spec := strings.TrimPrefix(rangeHeader, "bytes=")
+	parts := strings.SplitN(spec, "-", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		http.Error(w, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	start, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	var length int64 = -1 // -1 means read to end of object
+	var end int64
+	if parts[1] != "" {
+		end, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		length = end - start + 1
+	}
+
+	reader, err := obj.NewRangeReader(ctx, start, length)
+	if err != nil {
+		h.logger.Error().Err(err).Str("blob_id", entry.BlobID).
+			Int64("start", start).Int64("length", length).Msg("Azure GET: GCS range read failed")
+		http.Error(w, "Range read failed", 500)
+		return
+	}
+	defer reader.Close()
+
+	totalSize := reader.Attrs.Size
+	if parts[1] == "" {
+		end = totalSize - 1
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", end-start+1))
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, totalSize))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.WriteHeader(http.StatusPartialContent) // 206
+
+	written, _ := io.Copy(w, reader)
+	h.logger.Info().
+		Str("blob_id", entry.BlobID).
+		Int64("start", start).Int64("end", end).Int64("bytes", written).
+		Msg("Azure GET range download")
 }
 
 // HandleBlobUpload handles simple single-shot blob uploads (files < 128MB)

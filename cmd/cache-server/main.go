@@ -81,6 +81,9 @@ func buildConfig() (cache.Config, error) {
 	if v := os.Getenv("CACHE_KEY_FILE"); v != "" {
 		cfg.KeyFile = v
 	}
+	if v := os.Getenv("CACHE_AZURE_BLOB_HOST"); v != "" {
+		cfg.AzureBlobHost = v
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return cache.Config{}, err
