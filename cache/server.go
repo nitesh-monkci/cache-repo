@@ -74,6 +74,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/", s.handlers.Router)
 	mux.HandleFunc("/health", s.handlers.HealthHandler)
 	mux.HandleFunc("/blob/", s.handlers.BlobRouter)
+	mux.HandleFunc("/cache-blobs/", s.handlers.AzureBlobRouter)
 
 	s.httpServer = &http.Server{
 		Addr:    ":" + s.config.Port,
