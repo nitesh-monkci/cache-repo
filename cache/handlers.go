@@ -210,7 +210,7 @@ func (h *Handlers) HandleGetCache(w http.ResponseWriter, r *http.Request) {
 
 			h.jsonResponse(w, map[string]interface{}{
 				"ok":                  true,
-				"signed_download_url": h.generateSignedDownloadURL(entry),
+				"signed_download_url": fmt.Sprintf("%s/blob/%s", h.baseURL, entry.BlobID),
 				"matched_key":         entry.Key,
 			})
 			return
@@ -233,7 +233,7 @@ func (h *Handlers) HandleGetCache(w http.ResponseWriter, r *http.Request) {
 
 				h.jsonResponse(w, map[string]interface{}{
 					"ok":                  true,
-					"signed_download_url": h.generateSignedDownloadURL(entry),
+					"signed_download_url": fmt.Sprintf("%s/blob/%s", h.baseURL, entry.BlobID),
 					"matched_key":         entry.Key,
 				})
 				return
@@ -746,25 +746,4 @@ func (h *Handlers) generateBlobID(key, version string) string {
 func (h *Handlers) jsonResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
-}
-
-// generateSignedDownloadURL creates a direct GCS Signed URL for the runner to download.
-// If signing fails (e.g., due to missing IAM permissions), it falls back to the proxy URL.
-func (h *Handlers) generateSignedDownloadURL(entry *CacheEntry) string {
-	gcsPath := h.indexManager.BlobGCSPath(entry.Scope, entry.BlobID)
-
-	opts := &storage.SignedURLOptions{
-		Scheme:  storage.SigningSchemeV4,
-		Method:  "GET",
-		Expires: time.Now().Add(1 * time.Hour),
-	}
-
-	signedURL, err := h.gcsClient.Bucket(h.config.Bucket).SignedURL(gcsPath, opts)
-	if err != nil {
-		h.logger.Error().Err(err).Str("blob_id", entry.BlobID).Str("gcs_path", gcsPath).Msg("Failed to generate signed URL, falling back to proxy")
-		return fmt.Sprintf("%s/blob/%s", h.baseURL, entry.BlobID)
-	}
-
-	h.logger.Info().Str("blob_id", entry.BlobID).Str("signed_url", signedURL).Msg("Generated signed download URL")
-	return signedURL
 }
