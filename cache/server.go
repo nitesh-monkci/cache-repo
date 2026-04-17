@@ -2,8 +2,11 @@ package cache
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -89,11 +92,51 @@ func (s *Server) Start(ctx context.Context) error {
 		Str("write_scope", s.config.WriteScope).
 		Msg("Cache server ready")
 
+	// Log TLS status and cert SANs so misconfigured certs are caught at startup
+	if s.config.CertFile != "" && s.config.KeyFile != "" {
+		if sans, err := readCertSANs(s.config.CertFile); err != nil {
+			s.logger.Warn().Err(err).Str("cert_file", s.config.CertFile).
+				Msg("TLS: enabled but could not read cert SANs — verify with: openssl x509 -in <cert> -text -noout | grep -A1 SAN")
+		} else {
+			s.logger.Info().Str("cert_file", s.config.CertFile).Strs("cert_sans", sans).Msg("TLS: enabled")
+		}
+	} else {
+		s.logger.Info().Msg("TLS: disabled (plain HTTP)")
+	}
+
+	// Log Azure fast-download mode
+	if s.config.AzureBlobHost != "" {
+		s.logger.Info().
+			Str("azure_blob_host", s.config.AzureBlobHost).
+			Str("route", "/cache-blobs/").
+			Msg("Azure fast-download path: ENABLED — toolkit will use parallel chunked downloads")
+	} else {
+		s.logger.Info().
+			Msg("Azure fast-download path: DISABLED — set CACHE_AZURE_BLOB_HOST to enable (e.g. monkcicache.blob.core.windows.net)")
+	}
+
 	// Start server — TLS is enabled when cert and key files are explicitly configured
 	if s.config.CertFile != "" && s.config.KeyFile != "" {
 		return s.httpServer.ListenAndServeTLS(s.config.CertFile, s.config.KeyFile)
 	}
 	return s.httpServer.ListenAndServe()
+}
+
+// readCertSANs reads the DNS SANs from a PEM-encoded certificate file.
+func readCertSANs(certFile string) ([]string, error) {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block in %s", certFile)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return cert.DNSNames, nil
 }
 
 // Stop stops the cache server gracefully
