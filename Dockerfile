@@ -14,6 +14,9 @@ FROM alpine:3.23
 RUN apk add --no-cache ca-certificates && \
     addgroup -S cache && adduser -S cache -G cache
 
+# Create a 3GB dummy file to test cache upload/download speed
+RUN dd if=/dev/zero of=/tmp/dummy_3gb.bin bs=1M count=3072
+
 COPY --from=builder /app/cache-server /app/cache-server
 
 USER cache
