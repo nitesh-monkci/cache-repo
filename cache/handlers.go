@@ -602,10 +602,12 @@ func (h *Handlers) HandleAzureBlobDownload(w http.ResponseWriter, r *http.Reques
 
 // HandleBlobUpload handles simple single-shot blob uploads (files < 128MB)
 func (h *Handlers) HandleBlobUpload(w http.ResponseWriter, r *http.Request, entry *CacheEntry) {
+	startTime := time.Now()
 	h.logger.Info().
 		Str("blob_id", entry.BlobID).
 		Str("key", entry.Key).
 		Str("scope", entry.Scope).
+		Time("start_time", startTime).
 		Msg("Single-shot blob upload started")
 
 	ctx := context.Background()
@@ -631,11 +633,16 @@ func (h *Handlers) HandleBlobUpload(w http.ResponseWriter, r *http.Request, entr
 	entry.Size = written
 	h.indexManager.Set(entry)
 
+	duration := time.Since(startTime)
+	speedMBps := float64(written) / 1024 / 1024 / duration.Seconds()
 	h.logger.Info().
 		Str("blob_id", entry.BlobID).
 		Str("key", entry.Key).
 		Int64("size_bytes", written).
 		Str("gcs_path", gcsPath).
+		Time("end_time", time.Now()).
+		Dur("duration", duration).
+		Float64("speed_mbps", speedMBps).
 		Msg("Single-shot blob upload completed")
 
 	w.WriteHeader(201)
@@ -644,6 +651,7 @@ func (h *Handlers) HandleBlobUpload(w http.ResponseWriter, r *http.Request, entr
 // HandleBlockUpload stores a single block chunk (Azure Block Blob protocol)
 // Called when: PUT /blob/<id>?comp=block&blockid=<base64id>
 func (h *Handlers) HandleBlockUpload(w http.ResponseWriter, r *http.Request, entry *CacheEntry) {
+	startTime := time.Now()
 	blockID := r.URL.Query().Get("blockid")
 	if blockID == "" {
 		h.logger.Error().Str("blob_id", entry.BlobID).Msg("Missing blockid parameter")
@@ -688,12 +696,17 @@ func (h *Handlers) HandleBlockUpload(w http.ResponseWriter, r *http.Request, ent
 	blockCount := len(h.blocks[entry.BlobID])
 	h.blocksMu.Unlock()
 
+	duration := time.Since(startTime)
+	speedMBps := float64(written) / 1024 / 1024 / duration.Seconds()
 	h.logger.Info().
 		Str("blob_id", entry.BlobID).
 		Str("block_id", blockID).
 		Int64("block_size", written).
 		Int("total_blocks_so_far", blockCount).
 		Str("gcs_path", blockPath).
+		Time("end_time", time.Now()).
+		Dur("duration", duration).
+		Float64("speed_mbps", speedMBps).
 		Msg("Block uploaded")
 
 	w.WriteHeader(201)
@@ -701,9 +714,11 @@ func (h *Handlers) HandleBlockUpload(w http.ResponseWriter, r *http.Request, ent
 
 // HandleBlockListCommit assembles all blocks into the final blob using GCS Compose
 func (h *Handlers) HandleBlockListCommit(w http.ResponseWriter, r *http.Request, entry *CacheEntry) {
+	startTime := time.Now()
 	h.logger.Info().
 		Str("blob_id", entry.BlobID).
 		Str("key", entry.Key).
+		Time("start_time", startTime).
 		Msg("Block list commit started")
 
 	// Parse the XML block list from the request body
@@ -749,10 +764,13 @@ func (h *Handlers) HandleBlockListCommit(w http.ResponseWriter, r *http.Request,
 	entry.Size = composed
 	h.indexManager.Set(entry)
 
+	duration := time.Since(startTime)
 	h.logger.Info().
 		Str("blob_id", entry.BlobID).
 		Int64("total_size", composed).
 		Int("block_count", len(blockList.Latest)).
+		Time("end_time", time.Now()).
+		Dur("duration", duration).
 		Msg("GCS Compose completed — no data through server")
 
 	go h.cleanupBlocks(entry, blockList.Latest)
@@ -851,10 +869,12 @@ func (h *Handlers) blockGCSPath(entry *CacheEntry, blockID string) string {
 
 // HandleBlobDownload handles blob downloads
 func (h *Handlers) HandleBlobDownload(w http.ResponseWriter, r *http.Request, entry *CacheEntry) {
+	startTime := time.Now()
 	h.logger.Info().
 		Str("blob_id", entry.BlobID).
 		Str("key", entry.Key).
 		Str("scope", entry.Scope).
+		Time("start_time", startTime).
 		Msg("Blob download started")
 
 	ctx := context.Background()
@@ -878,10 +898,15 @@ func (h *Handlers) HandleBlobDownload(w http.ResponseWriter, r *http.Request, en
 		return
 	}
 
+	duration := time.Since(startTime)
+	speedMBps := float64(written) / 1024 / 1024 / duration.Seconds()
 	h.logger.Info().
 		Str("blob_id", entry.BlobID).
 		Str("key", entry.Key).
 		Int64("size_bytes", written).
+		Time("end_time", time.Now()).
+		Dur("duration", duration).
+		Float64("speed_mbps", speedMBps).
 		Msg("Blob download completed")
 }
 
